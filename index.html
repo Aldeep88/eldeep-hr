@@ -8,35 +8,10 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <!-- Firebase SDK -->
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyC8YH6JKavVDbJyXkka4oeg4Uan8IwYIfA",
-      authDomain: "pharmacy-hr-c8be0.firebaseapp.com",
-      projectId: "pharmacy-hr-c8be0",
-      storageBucket: "pharmacy-hr-c8be0.firebasestorage.app",
-      messagingSenderId: "358960386819",
-      appId: "1:358960386819:web:81dca8ac30583378f08f36"
-    };
-
-    const app = initializeApp(firebaseConfig);
-    const fsdb = getFirestore(app);
-    const auth = getAuth(app);
-
-    // Offline persistence
-    enableIndexedDbPersistence(fsdb).catch(() => {});
-
-    // Anonymous auth
-    signInAnonymously(auth).catch(() => {});
-
-    window.__fsdb = fsdb;
-    window.__fsMods = { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch };
-    window.dispatchEvent(new Event("firebaseReady"));
-  </script>
+  <!-- Firebase SDK via compat -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Cairo', Arial, sans-serif; direction: rtl; }
@@ -49,6 +24,28 @@
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
+
+// ══════════════════════════════════════════════
+//  FIREBASE INIT (داخل Babel عشان يشتغل صح)
+// ══════════════════════════════════════════════
+(function initFirebase() {
+  if (window.__fsdb) return;
+  try {
+    const firebaseConfig = {
+      apiKey: "AIzaSyC8YH6JKavVDbJyXkka4oeg4Uan8IwYIfA",
+      authDomain: "pharmacy-hr-c8be0.firebaseapp.com",
+      projectId: "pharmacy-hr-c8be0",
+      storageBucket: "pharmacy-hr-c8be0.firebasestorage.app",
+      messagingSenderId: "358960386819",
+      appId: "1:358960386819:web:81dca8ac30583378f08f36"
+    };
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    db.enablePersistence().catch(() => {});
+    firebase.auth().signInAnonymously().catch(() => {});
+    window.__fsdb = db;
+  } catch(e) { console.error("Firebase init error:", e); }
+})();
 
 // ══════════════════════════════════════════════
 //  EXPORT HELPERS — PDF & EXCEL (ملونة واحترافية)
@@ -414,55 +411,53 @@ function useDB() {
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
   }, []);
 
-  // Firebase real-time listeners
+  // Firebase real-time listeners (compat API) - مع retry
   useEffect(() => {
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (!fsdb || !mods) return;
-    const { collection, onSnapshot } = mods;
+    let unsubs = [];
+    let cancelled = false;
 
-    const unsubs = [];
+    function attach() {
+      const db = window.__fsdb;
+      if (!db) { if (!cancelled) setTimeout(attach, 200); return; }
 
-    // Listen to employees
-    unsubs.push(onSnapshot(collection(fsdb, "employees"), snap => {
-      if (!snap.empty) {
-        const data = snap.docs.map(d => d.data());
-        setEmployeesState(data);
-        localStorage.setItem(KEYS.employees, JSON.stringify(data));
-      }
-      setSynced(true);
-    }, () => setSynced(false)));
+      unsubs.push(db.collection("employees").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setEmployeesState(data);
+          localStorage.setItem(KEYS.employees, JSON.stringify(data));
+        }
+        setSynced(true);
+      }, () => setSynced(false)));
 
-    // Listen to records
-    unsubs.push(onSnapshot(collection(fsdb, "records"), snap => {
-      if (!snap.empty) {
-        const data = snap.docs.map(d => d.data());
-        setRecordsState(data);
-        localStorage.setItem(KEYS.records, JSON.stringify(data));
-      }
-    }, () => {}));
+      unsubs.push(db.collection("records").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setRecordsState(data);
+          localStorage.setItem(KEYS.records, JSON.stringify(data));
+        }
+      }, () => {}));
 
-    // Listen to settings
-    unsubs.push(onSnapshot(collection(fsdb, "settings"), snap => {
-      if (!snap.empty) {
-        const merged = {};
-        snap.docs.forEach(d => Object.assign(merged, d.data()));
-        const s = { ...DEFAULT_SETTINGS, ...merged };
-        setSettingsState(s);
-        localStorage.setItem(KEYS.settings, JSON.stringify(s));
-      }
-    }, () => {}));
+      unsubs.push(db.collection("settings").onSnapshot(snap => {
+        if (!snap.empty) {
+          const merged = {};
+          snap.docs.forEach(d => Object.assign(merged, d.data()));
+          const s = { ...DEFAULT_SETTINGS, ...merged };
+          setSettingsState(s);
+          localStorage.setItem(KEYS.settings, JSON.stringify(s));
+        }
+      }, () => {}));
 
-    // Listen to shifts
-    unsubs.push(onSnapshot(collection(fsdb, "shifts"), snap => {
-      if (!snap.empty) {
-        const data = snap.docs.map(d => d.data());
-        setShiftsState(data);
-        localStorage.setItem(KEYS.shifts, JSON.stringify(data));
-      }
-    }, () => {}));
+      unsubs.push(db.collection("shifts").onSnapshot(snap => {
+        if (!snap.empty) {
+          const data = snap.docs.map(d => d.data());
+          setShiftsState(data);
+          localStorage.setItem(KEYS.shifts, JSON.stringify(data));
+        }
+      }, () => {}));
+    }
 
-    return () => unsubs.forEach(u => u());
+    attach();
+    return () => { cancelled = true; unsubs.forEach(u => u()); };
   }, []);
 
   // Helper: اكتب في Firebase + localStorage
@@ -485,20 +480,15 @@ function useDB() {
     }
   }
 
-  // setEmployees: يكتب كل موظف كـ document منفصل
+  // setEmployees: يكتب كل موظف كـ document منفصل (compat API)
   const setEmployees = useCallback((val) => {
     const next = typeof val === "function" ? val(employees) : val;
     setEmployeesState(next);
     localStorage.setItem(KEYS.employees, JSON.stringify(next));
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, setDoc, collection, writeBatch } = mods;
-      // حذف القديم وكتابة الجديد باستخدام batch
-      const batch = writeBatch(fsdb);
-      next.forEach(emp => {
-        batch.set(doc(fsdb, "employees", emp.id), emp);
-      });
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(emp => batch.set(db.collection("employees").doc(emp.id), emp));
       batch.commit().catch(() => {});
     }
   }, [employees]);
@@ -507,14 +497,10 @@ function useDB() {
     const next = typeof val === "function" ? val(records) : val;
     setRecordsState(next);
     localStorage.setItem(KEYS.records, JSON.stringify(next));
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, setDoc, writeBatch } = mods;
-      const batch = writeBatch(fsdb);
-      next.forEach(rec => {
-        batch.set(doc(fsdb, "records", rec.id), rec);
-      });
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(rec => batch.set(db.collection("records").doc(rec.id), rec));
       batch.commit().catch(() => {});
     }
   }, [records]);
@@ -523,11 +509,9 @@ function useDB() {
     const next = typeof val === "function" ? val(settings) : val;
     setSettingsState(next);
     localStorage.setItem(KEYS.settings, JSON.stringify(next));
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, setDoc } = mods;
-      setDoc(doc(fsdb, "settings", "main"), next).catch(() => {});
+    const db = window.__fsdb;
+    if (db) {
+      db.collection("settings").doc("main").set(next).catch(() => {});
     }
   }, [settings]);
 
@@ -535,14 +519,10 @@ function useDB() {
     const next = typeof val === "function" ? val(shifts) : val;
     setShiftsState(next);
     localStorage.setItem(KEYS.shifts, JSON.stringify(next));
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, setDoc, writeBatch } = mods;
-      const batch = writeBatch(fsdb);
-      next.forEach(sh => {
-        batch.set(doc(fsdb, "shifts", sh.id), sh);
-      });
+    const db = window.__fsdb;
+    if (db) {
+      const batch = db.batch();
+      next.forEach(sh => batch.set(db.collection("shifts").doc(sh.id), sh));
       batch.commit().catch(() => {});
     }
   }, [shifts]);
@@ -1830,28 +1810,17 @@ function TabSettings({ settings, setSettings, employees, setEmployees, records, 
   function saveSettings() { setSettings(form); toast("✅ تم حفظ الإعدادات"); }
 
   async function clearAllData() {
-    // مسح localStorage
     Object.values(KEYS).forEach(k => localStorage.removeItem(k));
-    // مسح Firestore
-    const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { collection, doc, deleteDoc, writeBatch } = mods;
+    const db = window.__fsdb;
+    if (db) {
       try {
-        const batch = writeBatch(fsdb);
-        const colls = ["employees","records","settings","shifts"];
-        for (const col of colls) {
-          const snap = await mods.getDocs ? mods.getDocs(collection(fsdb,col)).catch(()=>null) : null;
-          // نستخدم getDocs من module scope
-        }
-        // حذف كل الـ collections
-        const { getDocs } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+        const batch = db.batch();
         for (const col of ["employees","records","settings","shifts"]) {
-          const snap = await getDocs(collection(fsdb, col)).catch(()=>null);
-          if (snap) snap.docs.forEach(d => batch.delete(doc(fsdb, col, d.id)));
+          const snap = await db.collection(col).get();
+          snap.docs.forEach(d => batch.delete(d.ref));
         }
         await batch.commit();
-      } catch(e) { console.warn("Firestore clear error", e); }
+      } catch(e) {}
     }
     toast("🗑️ تم مسح كل البيانات — جاري إعادة التشغيل...", "error");
     setTimeout(() => window.location.reload(), 1800);
@@ -2950,10 +2919,7 @@ function App() {
   const [fbReady, setFbReady] = useState(!!window.__fsdb);
 
   useEffect(() => {
-    if (window.__fsdb) { setFbReady(true); return; }
-    const handler = () => setFbReady(true);
-    window.addEventListener("firebaseReady", handler);
-    return () => window.removeEventListener("firebaseReady", handler);
+    setFbReady(true);
   }, []);
 
   useEffect(() => {
@@ -2965,28 +2931,22 @@ function App() {
     if (!localStorage.getItem(KEYS.settings)) localStorage.setItem(KEYS.settings, JSON.stringify(DEFAULT_SETTINGS));
     if (!localStorage.getItem(KEYS.shifts)) localStorage.setItem(KEYS.shifts, JSON.stringify(DEFAULT_SHIFTS));
 
-    // لو أول مرة (مفيش بيانات في localStorage) ارفع الـ defaults لـ Firestore
+    // لو أول مرة ارفع الـ defaults لـ Firestore
     if (!hasEmps) {
-      const waitForFb = () => {
-        const fsdb = window.__fsdb;
-        const mods = window.__fsMods;
-        if (!fsdb || !mods) { setTimeout(waitForFb, 500); return; }
-        const { doc, setDoc, collection, writeBatch } = mods;
-        // Check if Firestore already has data before uploading defaults
-        import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js").then(({getDocs}) => {
-          getDocs(collection(fsdb, "employees")).then(snap => {
-            if (!snap.empty) return; // Firebase already has data, don't overwrite
-            const batch = writeBatch(fsdb);
-            DEFAULT_EMPLOYEES.forEach(e => batch.set(doc(fsdb, "employees", e.id), e));
-            DEFAULT_RECORDS.forEach(r => batch.set(doc(fsdb, "records", r.id), r));
-            DEFAULT_SHIFTS.forEach(s => batch.set(doc(fsdb, "shifts", s.id), s));
-            batch.set(doc(fsdb, "settings", "main"), DEFAULT_SETTINGS);
-            batch.commit().catch(()=>{});
-          }).catch(()=>{});
+      const uploadDefaults = () => {
+        const db = window.__fsdb;
+        if (!db) { setTimeout(uploadDefaults, 300); return; }
+        db.collection("employees").get().then(snap => {
+          if (!snap.empty) return;
+          const batch = db.batch();
+          DEFAULT_EMPLOYEES.forEach(e => batch.set(db.collection("employees").doc(e.id), e));
+          DEFAULT_RECORDS.forEach(r => batch.set(db.collection("records").doc(r.id), r));
+          DEFAULT_SHIFTS.forEach(s => batch.set(db.collection("shifts").doc(s.id), s));
+          batch.set(db.collection("settings").doc("main"), DEFAULT_SETTINGS);
+          batch.commit().catch(()=>{});
         }).catch(()=>{});
       };
-      if (window.__fsdb) waitForFb();
-      else window.addEventListener("firebaseReady", waitForFb, {once:true});
+      setTimeout(uploadDefaults, 500);
     }
   }, []);
 
