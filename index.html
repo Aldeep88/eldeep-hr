@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- منع الكاش على الموبايل -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>نظام الحضور والانصراف</title>
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -41,7 +45,8 @@
     };
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
-    db.enablePersistence().catch(() => {});
+    // ❌ أزلنا enablePersistence عشان كانت بتسبب كاش قديم على الموبايل
+    db.settings({ experimentalForceLongPolling: true, merge: true });
     firebase.auth().signInAnonymously().catch(() => {});
     window.__fsdb = db;
   } catch(e) { console.error("Firebase init error:", e); }
@@ -460,23 +465,18 @@ function useDB() {
     return () => { cancelled = true; unsubs.forEach(u => u()); };
   }, []);
 
-  // Helper: اكتب في Firebase + localStorage
-  function fsSet(collName, id, data) {
-    localStorage.setItem(KEYS[collName] || collName, JSON.stringify(data)); // fallback local
+  // Helper: اكتب في Firebase + localStorage (compat API)
+  function fsSet(collName, docId, data) {
     const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, setDoc, collection } = mods;
-      setDoc(doc(fsdb, collName, id), data).catch(() => {});
+    if (fsdb) {
+      fsdb.collection(collName).doc(docId).set(data).catch(() => {});
     }
   }
 
-  function fsDel(collName, id) {
+  function fsDel(collName, docId) {
     const fsdb = window.__fsdb;
-    const mods = window.__fsMods;
-    if (fsdb && mods) {
-      const { doc, deleteDoc } = mods;
-      deleteDoc(doc(fsdb, collName, id)).catch(() => {});
+    if (fsdb) {
+      fsdb.collection(collName).doc(docId).delete().catch(() => {});
     }
   }
 
@@ -578,7 +578,7 @@ function Modal({ title, onClose, children }) {
 // ══════════════════════════════════════════════
 //  LOGIN SCREEN
 // ══════════════════════════════════════════════
-function LoginScreen({ onLogin, settings }) {
+function LoginScreen({ onLogin, settings, employees: empFromDB }) {
   const [role, setRole] = useState("employee");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -591,8 +591,6 @@ function LoginScreen({ onLogin, settings }) {
     return () => clearInterval(t);
   }, []);
 
-  const db = { employees: JSON.parse(localStorage.getItem(KEYS.employees) || "[]") };
-
   function handleLogin() {
     setError("");
     if (!username || !password) { setError("من فضلك أدخل اسم المستخدم وكلمة السر"); return; }
@@ -601,7 +599,10 @@ function LoginScreen({ onLogin, settings }) {
         onLogin({ role: "admin", name: settings.companyName || "المدير" });
       } else { setError("اسم المستخدم أو كلمة السر غير صحيحة"); }
     } else {
-      const employees = JSON.parse(localStorage.getItem(KEYS.employees) || JSON.stringify(DEFAULT_EMPLOYEES));
+      // نستخدم الموظفين من Firebase أولاً، وإلا من localStorage كـ fallback
+      const employees = (empFromDB && empFromDB.length > 0)
+        ? empFromDB
+        : JSON.parse(localStorage.getItem(KEYS.employees) || JSON.stringify(DEFAULT_EMPLOYEES));
       const emp = employees.find(e => e.username === username && e.password === password);
       if (emp) { onLogin({ role: "employee", ...emp }); }
       else { setError("اسم المستخدم أو كلمة السر غير صحيحة"); }
@@ -2953,7 +2954,7 @@ function App() {
   return (
     <>
       <SyncIndicator synced={db.synced} online={db.online} />
-      {!user && <LoginScreen onLogin={setUser} settings={db.settings} />}
+      {!user && <LoginScreen onLogin={setUser} settings={db.settings} employees={db.employees} />}
       {user && user.role === "admin" && <AdminDashboard user={user} onLogout={() => setUser(null)} db={db} />}
       {user && user.role === "employee" && <EmployeeDashboard user={user} onLogout={() => setUser(null)} db={db} />}
     </>
