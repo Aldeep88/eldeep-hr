@@ -45,8 +45,6 @@
     };
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
-    // ❌ أزلنا enablePersistence عشان كانت بتسبب كاش قديم على الموبايل
-    db.settings({ experimentalForceLongPolling: true, merge: true });
     firebase.auth().signInAnonymously().catch(() => {});
     window.__fsdb = db;
   } catch(e) { console.error("Firebase init error:", e); }
@@ -425,7 +423,12 @@ function useDB() {
       const db = window.__fsdb;
       if (!db) { if (!cancelled) setTimeout(attach, 200); return; }
 
-      unsubs.push(db.collection("employees").onSnapshot(snap => {
+      // { includeMetadataChanges: false } = بيستنى Server confirmation بس مش local writes
+      const snapOpts = { includeMetadataChanges: false };
+
+      unsubs.push(db.collection("employees").onSnapshot(snapOpts, snap => {
+        // بنتجاهل التحديثات اللي من الجهاز نفسه (local) عشان مانعملش loop
+        if (snap.metadata.fromCache) return;
         if (!snap.empty) {
           const data = snap.docs.map(d => d.data());
           setEmployeesState(data);
@@ -434,7 +437,8 @@ function useDB() {
         setSynced(true);
       }, () => setSynced(false)));
 
-      unsubs.push(db.collection("records").onSnapshot(snap => {
+      unsubs.push(db.collection("records").onSnapshot(snapOpts, snap => {
+        if (snap.metadata.fromCache) return;
         if (!snap.empty) {
           const data = snap.docs.map(d => d.data());
           setRecordsState(data);
@@ -442,7 +446,8 @@ function useDB() {
         }
       }, () => {}));
 
-      unsubs.push(db.collection("settings").onSnapshot(snap => {
+      unsubs.push(db.collection("settings").onSnapshot(snapOpts, snap => {
+        if (snap.metadata.fromCache) return;
         if (!snap.empty) {
           const merged = {};
           snap.docs.forEach(d => Object.assign(merged, d.data()));
@@ -452,7 +457,8 @@ function useDB() {
         }
       }, () => {}));
 
-      unsubs.push(db.collection("shifts").onSnapshot(snap => {
+      unsubs.push(db.collection("shifts").onSnapshot(snapOpts, snap => {
+        if (snap.metadata.fromCache) return;
         if (!snap.empty) {
           const data = snap.docs.map(d => d.data());
           setShiftsState(data);
@@ -465,32 +471,35 @@ function useDB() {
     return () => { cancelled = true; unsubs.forEach(u => u()); };
   }, []);
 
-  // Helper: اكتب في Firebase + localStorage (compat API)
+  // ══ FAST Firebase Helpers ══
+  // بيكتب doc واحد بس بدل ما يكتب كل الـ array
   function fsSet(collName, docId, data) {
     const fsdb = window.__fsdb;
-    if (fsdb) {
-      fsdb.collection(collName).doc(docId).set(data).catch(() => {});
-    }
+    if (fsdb) fsdb.collection(collName).doc(docId).set(data).catch(() => {});
   }
 
   function fsDel(collName, docId) {
     const fsdb = window.__fsdb;
-    if (fsdb) {
-      fsdb.collection(collName).doc(docId).delete().catch(() => {});
-    }
+    if (fsdb) fsdb.collection(collName).doc(docId).delete().catch(() => {});
   }
 
-  // setEmployees: يكتب كل موظف كـ document منفصل (compat API)
+  // setEmployees: بيحدد إيه اللي اتغير ويكتبه بس
   const setEmployees = useCallback((val) => {
     const next = typeof val === "function" ? val(employees) : val;
     setEmployeesState(next);
     localStorage.setItem(KEYS.employees, JSON.stringify(next));
     const db = window.__fsdb;
-    if (db) {
-      const batch = db.batch();
-      next.forEach(emp => batch.set(db.collection("employees").doc(emp.id), emp));
-      batch.commit().catch(() => {});
-    }
+    if (!db) return;
+    // اكتشف الفرق — اكتب المضاف أو المعدل بس
+    const prevIds = new Set(employees.map(e => e.id));
+    const nextIds = new Set(next.map(e => e.id));
+    // موظفين اتحذفوا
+    employees.forEach(e => { if (!nextIds.has(e.id)) fsDel("employees", e.id); });
+    // موظفين جدد أو اتعدلوا
+    next.forEach(e => {
+      const old = employees.find(o => o.id === e.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(e)) fsSet("employees", e.id, e);
+    });
   }, [employees]);
 
   const setRecords = useCallback((val) => {
@@ -498,11 +507,14 @@ function useDB() {
     setRecordsState(next);
     localStorage.setItem(KEYS.records, JSON.stringify(next));
     const db = window.__fsdb;
-    if (db) {
-      const batch = db.batch();
-      next.forEach(rec => batch.set(db.collection("records").doc(rec.id), rec));
-      batch.commit().catch(() => {});
-    }
+    if (!db) return;
+    // سجلات اتحذفت
+    records.forEach(r => { if (!next.find(n => n.id === r.id)) fsDel("records", r.id); });
+    // سجلات جديدة أو اتعدلت
+    next.forEach(r => {
+      const old = records.find(o => o.id === r.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(r)) fsSet("records", r.id, r);
+    });
   }, [records]);
 
   const setSettings = useCallback((val) => {
@@ -510,9 +522,7 @@ function useDB() {
     setSettingsState(next);
     localStorage.setItem(KEYS.settings, JSON.stringify(next));
     const db = window.__fsdb;
-    if (db) {
-      db.collection("settings").doc("main").set(next).catch(() => {});
-    }
+    if (db) db.collection("settings").doc("main").set(next).catch(() => {});
   }, [settings]);
 
   const setShifts = useCallback((val) => {
@@ -520,11 +530,12 @@ function useDB() {
     setShiftsState(next);
     localStorage.setItem(KEYS.shifts, JSON.stringify(next));
     const db = window.__fsdb;
-    if (db) {
-      const batch = db.batch();
-      next.forEach(sh => batch.set(db.collection("shifts").doc(sh.id), sh));
-      batch.commit().catch(() => {});
-    }
+    if (!db) return;
+    shifts.forEach(s => { if (!next.find(n => n.id === s.id)) fsDel("shifts", s.id); });
+    next.forEach(s => {
+      const old = shifts.find(o => o.id === s.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(s)) fsSet("shifts", s.id, s);
+    });
   }, [shifts]);
 
   return { employees, setEmployees, records, setRecords, settings, setSettings, shifts, setShifts, synced, online };
