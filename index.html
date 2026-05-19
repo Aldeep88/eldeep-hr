@@ -448,6 +448,7 @@ function useDB() {
 
       unsubs.push(db.collection("settings").onSnapshot(snapOpts, snap => {
         if (snap.metadata.fromCache) return;
+        if (window.__settingsSaving) return;
         if (!snap.empty) {
           const merged = {};
           snap.docs.forEach(d => Object.assign(merged, d.data()));
@@ -522,7 +523,12 @@ function useDB() {
     setSettingsState(next);
     localStorage.setItem(KEYS.settings, JSON.stringify(next));
     const db = window.__fsdb;
-    if (db) db.collection("settings").doc("main").set(next).catch(() => {});
+    if (db) {
+      window.__settingsSaving = true;
+      db.collection("settings").doc("main").set(next)
+        .then(() => { setTimeout(() => { window.__settingsSaving = false; }, 3000); })
+        .catch(() => { window.__settingsSaving = false; });
+    }
   }, [settings]);
 
   const setShifts = useCallback((val) => {
